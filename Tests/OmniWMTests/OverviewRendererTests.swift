@@ -92,7 +92,7 @@ final class OverviewRendererTests: XCTestCase {
         let bounds = CGRect(x: 0, y: 0, width: 1440, height: 900)
 
         XCTAssertEqual(
-            OverviewRenderer.visibleContentRect(bounds: bounds, scrollOffset: -320),
+            OverviewRenderGeometry.visibleContentRect(bounds: bounds, scrollOffset: -320),
             CGRect(x: 0, y: -320, width: 1440, height: 900)
         )
     }
@@ -102,8 +102,8 @@ final class OverviewRendererTests: XCTestCase {
         let visible = CGRect(x: 100, y: 100, width: 300, height: 200)
         let hidden = CGRect(x: 100, y: -700, width: 300, height: 200)
 
-        XCTAssertTrue(OverviewRenderer.shouldRender(frame: visible, visibleContentRect: viewport))
-        XCTAssertFalse(OverviewRenderer.shouldRender(frame: hidden, visibleContentRect: viewport))
+        XCTAssertTrue(OverviewRenderGeometry.shouldRender(frame: visible, visibleContentRect: viewport))
+        XCTAssertFalse(OverviewRenderGeometry.shouldRender(frame: hidden, visibleContentRect: viewport))
     }
 
     func testSectionCullingIncludesInterpolatedAnimationFrame() {
@@ -132,14 +132,14 @@ final class OverviewRendererTests: XCTestCase {
         let viewport = CGRect(x: 0, y: 0, width: 1000, height: 800)
 
         XCTAssertFalse(
-            OverviewRenderer.shouldRender(
+            OverviewRenderGeometry.shouldRender(
                 frame: section.sectionFrame.union(section.labelFrame),
                 visibleContentRect: viewport
             )
         )
         XCTAssertTrue(
-            OverviewRenderer.shouldRender(
-                frame: OverviewRenderer.sectionCullingFrame(section, progress: 0.1),
+            OverviewRenderGeometry.shouldRender(
+                frame: OverviewRenderGeometry.sectionCullingFrame(section, progress: 0.1),
                 visibleContentRect: viewport
             )
         )
@@ -161,7 +161,7 @@ final class OverviewRendererTests: XCTestCase {
         let workspaceId = UUID()
         let token = WindowToken(pid: 1, windowId: 1)
         let handle = WindowHandle(id: token)
-        let data: OverviewWindowLayoutData = (
+        let data: OverviewWindowLayoutData = OverviewWindowLayoutData(
             token: token,
             workspaceId: workspaceId,
             title: "Window",
@@ -170,12 +170,13 @@ final class OverviewRendererTests: XCTestCase {
             frame: CGRect(x: 0, y: 0, width: 800, height: 600)
         )
 
-        let layout = OverviewLayoutCalculator.calculateLayout(
-            workspaces: [(id: workspaceId, name: "Workspace", isActive: true)],
-            windows: [handle: data],
+        let layout = OverviewLayoutCalculator(
             screenFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
-            searchQuery: "",
             scale: 1
+        ).calculateLayout(
+            workspaces: [OverviewWorkspaceLayoutItem(id: workspaceId, name: "Workspace", isActive: true)],
+            windows: [handle: data],
+            searchQuery: ""
         )
 
         XCTAssertEqual(layout.allWindows.first?.appIcon?.width, 4)
@@ -187,9 +188,9 @@ final class OverviewRendererTests: XCTestCase {
         let labelFrame = CGRect(x: 20, y: -116, width: 960, height: 32)
         let viewport = CGRect(x: 0, y: -90, width: 1000, height: 800)
 
-        XCTAssertFalse(OverviewRenderer.shouldRender(frame: sectionFrame, visibleContentRect: viewport))
+        XCTAssertFalse(OverviewRenderGeometry.shouldRender(frame: sectionFrame, visibleContentRect: viewport))
         XCTAssertTrue(
-            OverviewRenderer.shouldRender(
+            OverviewRenderGeometry.shouldRender(
                 frame: sectionFrame.union(labelFrame),
                 visibleContentRect: viewport
             )

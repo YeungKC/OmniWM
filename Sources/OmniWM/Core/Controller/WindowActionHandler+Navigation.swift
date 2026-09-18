@@ -6,23 +6,46 @@ import Foundation
 
 extension WindowActionHandler {
     @discardableResult
-    func navigateToWindowInternal(
+    func navigateToWindowInternal(token: WindowToken, workspaceId: WorkspaceDescriptor.ID) -> Bool {
+        guard let controller,
+              let handle = prepareWindowNavigation(token: token, workspaceId: workspaceId)
+        else {
+            return false
+        }
+        commitWindowNavigation(handle: handle, workspaceId: workspaceId, controller: controller)
+        return true
+    }
+
+    func prepareOverviewSelection(handle: WindowHandle, workspaceId: WorkspaceDescriptor.ID) {
+        guard let controller else { return }
+        let workspaceManager = controller.workspaceManager
+        let previousWorkspaceId = workspaceManager.monitorForWorkspace(workspaceId)
+            .flatMap { workspaceManager.activeWorkspace(on: $0.id)?.id }
+        guard prepareWindowNavigation(token: handle.id, workspaceId: workspaceId, settlesMotion: true) != nil else {
+            return
+        }
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .overviewMutation,
+            affectedWorkspaceIds: Set([previousWorkspaceId, workspaceId].compactMap { $0 })
+        )
+    }
+
+    private func prepareWindowNavigation(
         token: WindowToken,
         workspaceId: WorkspaceDescriptor.ID,
-        motion: MotionSnapshot = .disabled,
-        focusAfterLayout: Bool = true
-    ) -> Bool {
+        settlesMotion: Bool = false
+    ) -> WindowHandle? {
         guard let controller,
               let handle = controller.workspaceManager.handle(for: token),
               let entry = controller.workspaceManager.entry(for: token),
               entry.workspaceId == workspaceId,
               !controller.workspaceManager.isAppHidden(pid: entry.pid)
         else {
-            return false
+            return nil
         }
         let targetLayoutKind = controller.workspaceManager.activeLayoutKind(for: workspaceId)
         if targetLayoutKind == .niri, controller.niriEngine == nil {
-            return false
+            return nil
         }
 
         let currentWsId = controller.activeWorkspace()?.id
@@ -48,26 +71,22 @@ extension WindowActionHandler {
                 )
             }
         case .niri:
-            guard let engine = controller.niriEngine else { return false }
-            prepareNiriNavigationTarget(
-                token, workspaceId: workspaceId, engine: engine, controller: controller, motion: motion
-            )
+            guard let engine = controller.niriEngine else { return nil }
+            if settlesMotion {
+                controller.niriLayoutHandler.cancelAnimationMotion(for: workspaceId)
+                for (displayId, animatedWorkspaceId) in controller.niriLayoutHandler.scrollAnimationByDisplay
+                    where animatedWorkspaceId == workspaceId
+                {
+                    controller.layoutRefreshController.stopScrollAnimation(for: displayId)
+                }
+            }
+            prepareNiriNavigationTarget(token, workspaceId: workspaceId, engine: engine, controller: controller)
         }
-        if !focusAfterLayout {
-            controller.layoutRefreshController.requestImmediateRelayout(
-                reason: .overviewMutation,
-                affectedWorkspaceIds: [workspaceId]
-            )
-            controller.layoutRefreshController.startScrollAnimation(for: workspaceId)
-            return true
-        }
-        commitWindowNavigation(handle: handle, workspaceId: workspaceId, controller: controller)
-        return true
+        return handle
     }
 
     private func prepareNiriNavigationTarget(
-        _ token: WindowToken, workspaceId: WorkspaceDescriptor.ID, engine: NiriLayoutEngine, controller: WMController,
-        motion: MotionSnapshot
+        _ token: WindowToken, workspaceId: WorkspaceDescriptor.ID, engine: NiriLayoutEngine, controller: WMController
     ) {
         var targetState = controller.workspaceManager.niriViewportState(for: workspaceId)
         if let niriWindow = engine.findNode(for: token, in: workspaceId) {
@@ -91,7 +110,7 @@ extension WindowActionHandler {
                         node: niriWindow,
                         context: .init(
                             workspaceId: workspaceId,
-                            motion: motion,
+                            motion: .disabled,
                             workingFrame: workingFrame,
                             gaps: gap,
                             orientation: orientation

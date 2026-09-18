@@ -3,6 +3,7 @@
 
 import CoreGraphics
 import Foundation
+import QuartzCore
 import ScreenCaptureKit
 
 struct OverviewPreviewRequest: Equatable {
@@ -32,7 +33,9 @@ final class OverviewThumbnailCapture {
         let id: UInt64
         let generation: UInt64
         let request: OverviewPreviewRequest
+        let requestedAt = CACurrentMediaTime()
         var status = Status.queued
+        var published = false
         var output: OverviewPreviewStream?
         var control: (any OverviewPreviewStreamControl)?
 
@@ -55,6 +58,7 @@ final class OverviewThumbnailCapture {
     private var discoveryTask: Task<Void, Never>?
     private var windowsByToken: [WindowToken: SCWindow] = [:]
     private(set) var previewCache: [WindowHandle: OverviewPreviewFrame] = [:]
+    private let memoryPressure: any DispatchSourceMemoryPressure
     var onPreview: @MainActor (WindowHandle, OverviewPreviewFrame?) -> Void = { _, _ in }
 
     init(
@@ -67,6 +71,15 @@ final class OverviewThumbnailCapture {
         self.ownedWindowRegistry = ownedWindowRegistry
         self.hasCaptureAccess = hasCaptureAccess
         self.streamFactory = streamFactory
+        memoryPressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        memoryPressure.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.releaseCache() }
+        }
+        memoryPressure.activate()
+    }
+
+    isolated deinit {
+        memoryPressure.cancel()
     }
 
     func reconcile(represented: Set<WindowHandle>, visible: [OverviewPreviewRequest]) {
@@ -102,7 +115,9 @@ final class OverviewThumbnailCapture {
         for key in sourceOrder {
             guard sources[key] == nil, let request = requests[key] else { continue }
             nextSourceId &+= 1
-            sources[key] = Source(id: nextSourceId, generation: generation, request: request)
+            let source = Source(id: nextSourceId, generation: generation, request: request)
+            sources[key] = source
+            trace(.previewRequested, source: source)
             added = true
         }
         if added { environment.onThumbnailCaptureStarted() }
@@ -121,10 +136,13 @@ final class OverviewThumbnailCapture {
         generation &+= 1
         discoveryTask?.cancel()
         discoveryTask = nil
-        windowsByToken.removeAll()
         for source in sources.values { retire(source) }
         sources.removeAll()
         sourceOrder.removeAll()
+    }
+
+    func releaseCache() {
+        guard sources.isEmpty else { return }
         let handles = Array(previewCache.keys)
         previewCache.removeAll()
         for handle in handles { onPreview(handle, nil) }
@@ -177,6 +195,7 @@ final class OverviewThumbnailCapture {
         starts.removeValue(forKey: source.id)
         if isCurrent(source), !failed, source.status != .failed {
             source.status = .running
+            trace(.previewStarted, source: source)
         } else {
             source.output?.invalidate()
             source.control?.stop()
@@ -197,7 +216,43 @@ final class OverviewThumbnailCapture {
               let frame = source.output?.take()
         else { return }
         previewCache[source.request.handle] = frame
+        if !source.published {
+            source.published = true
+            trace(.previewArrived, source: source)
+        }
         onPreview(source.request.handle, frame)
+    }
+
+    private func trace(_ event: OverviewFrameTrace.Event, source: Source) {
+        OverviewFrameTrace.shared.record(Self.record(
+            event,
+            sourceId: source.id,
+            requestedAt: source.requestedAt,
+            sequence: UInt64(source.request.token.windowId)
+        ))
+    }
+
+    private static func record(
+        _ event: OverviewFrameTrace.Event,
+        sourceId: UInt64,
+        requestedAt: CFTimeInterval,
+        sequence: UInt64
+    ) -> OverviewFrameTrace.Record {
+        let now = CACurrentMediaTime()
+        return OverviewFrameTrace.Record(
+            event: event,
+            mediaTime: now,
+            displayId: 0,
+            generation: sourceId,
+            sequence: sequence,
+            progress: 0,
+            durationMs: (now - requestedAt) * 1000,
+            waitMs: 0,
+            targetLeadMs: 0,
+            pendingInvalidations: 0,
+            endpointScheduled: false,
+            sessionCompleted: false
+        )
     }
 
     private func streamFailed(key: ObjectIdentifier, sourceId: UInt64) {
@@ -227,6 +282,7 @@ final class OverviewThumbnailCapture {
             return
         }
         let expectedGeneration = generation
+        let startedAt = CACurrentMediaTime()
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -238,6 +294,12 @@ final class OverviewThumbnailCapture {
                     else { return nil }
                     return (WindowToken(pid: app.processID, windowId: Int(window.windowID)), window)
                 })
+                OverviewFrameTrace.shared.record(Self.record(
+                    .previewDiscovery,
+                    sourceId: expectedGeneration,
+                    requestedAt: startedAt,
+                    sequence: UInt64(windowsByToken.count)
+                ))
             } catch {
                 FallbackFiringRecorder.shared.note(.capture, "overviewContentException")
             }

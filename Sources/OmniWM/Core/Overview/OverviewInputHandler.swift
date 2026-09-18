@@ -39,7 +39,6 @@ final class OverviewInputHandler {
     private weak var controller: OverviewController?
     private let projection: OverviewViewportProjection
     private let windowSession: OverviewWindowSession
-    private let focusSession: OverviewFocusSession
     private let overviewSnapshot: OverviewSnapshot
     private var state: OverviewState {
         controller?.state ?? .closed
@@ -50,12 +49,10 @@ final class OverviewInputHandler {
     init(
         projection: OverviewViewportProjection,
         windowSession: OverviewWindowSession,
-        focusSession: OverviewFocusSession,
         snapshot: OverviewSnapshot
     ) {
         self.projection = projection
         self.windowSession = windowSession
-        self.focusSession = focusSession
         overviewSnapshot = snapshot
     }
 
@@ -261,9 +258,7 @@ extension OverviewInputHandler {
     func selectAndActivateWindow(_ handle: WindowHandle) {
         guard case .open = state else { return }
         projection.setSelectedWindowHandle(handle)
-        updateWindowDisplays()
-
-        focusSession.scheduleSelectionDismissal(handle)
+        controller?.dismiss(reason: .selection, targetWindow: handle, animated: true)
     }
 
     func updateSearchQuery(_ query: String) {
@@ -302,14 +297,16 @@ extension OverviewInputHandler {
         selectAndActivateWindow(selectedWindowHandle)
     }
 
-    func dismissToSelection(animated: Bool) {
+    func selectionDismissal() -> (reason: OverviewController.OverviewDismissReason, targetWindow: WindowHandle?) {
         guard let selectedWindowHandle = projection.selectedWindowHandle,
               overviewSnapshot.windows[selectedWindowHandle] != nil
-        else {
-            controller?.dismiss(reason: .cancel, animated: animated)
-            return
-        }
-        controller?.dismiss(reason: .selection, targetWindow: selectedWindowHandle, animated: animated)
+        else { return (.cancel, nil) }
+        return (.selection, selectedWindowHandle)
+    }
+
+    func dismissToSelection(animated: Bool) {
+        let dismissal = selectionDismissal()
+        controller?.dismiss(reason: dismissal.reason, targetWindow: dismissal.targetWindow, animated: animated)
     }
 
     func closeSelectedWindow() {

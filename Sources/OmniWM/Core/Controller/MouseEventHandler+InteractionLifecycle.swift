@@ -50,6 +50,7 @@ extension MouseEventHandler {
         guard liveSessionID == sessionID || disposition == .viewportAlreadySettled && liveSessionID == nil else {
             return false
         }
+        retainConsumedTrackpadSession()
         switch disposition {
         case .settleLiveOffset:
             cancelCommittedGestureViewportState(for: workspaceId)
@@ -75,6 +76,7 @@ extension MouseEventHandler {
         resetMouseWheelTrackers()
         abortActiveGestureIfNeeded()
         clearGestureLatches()
+        clearConsumedTrackpadSessions()
     }
 
     func handleAppVisibilityChanged() {
@@ -99,17 +101,12 @@ extension MouseEventHandler {
         if state.isMoving {
             controller.niriEngine?.interactiveMoveCancel()
             controller.dwindleEngine?.interactiveMoveCancel()
-            state.dragGhostController?.endDrag()
-            state.isMoving = false
-            state.moveLayout = nil
-            state.activeInteractionButton = nil
+            clearMoveInteractionState()
         }
 
         if state.isResizing {
             finishActiveResize()
-            state.isResizing = false
-            state.activeInteractionButton = nil
-            state.resizeLayout = nil
+            clearResizeInteractionState()
         }
 
         resetHoveredEdgesIfNeeded()
@@ -191,31 +188,44 @@ extension MouseEventHandler {
             cancelActiveMouseInteraction()
             return
         }
-
         if state.isMoving {
             guard shouldAcceptInteractionButton(button) else { return }
-            if state.moveLayout == .dwindle {
-                finishDwindleMove()
-            } else {
-                finishNiriMove(at: location)
-            }
-
-            state.dragGhostController?.endDrag()
-            state.isMoving = false
-            state.moveLayout = nil
-            state.activeInteractionButton = nil
-            NSCursor.arrow.set()
+            completeActiveMove(at: location)
             return
         }
 
         guard state.isResizing else { return }
         guard shouldAcceptInteractionButton(button) else { return }
+        completeActiveResize()
+    }
 
-        finishActiveResize()
+    func clearMoveInteractionState() {
+        state.dragGhostController?.endDrag()
+        state.isMoving = false
+        state.moveLayout = nil
+        state.activeInteractionSource = nil
+    }
+
+    func clearResizeInteractionState() {
         state.isResizing = false
-        state.activeInteractionButton = nil
+        state.activeInteractionSource = nil
         state.resizeLayout = nil
-        NSCursor.arrow.set()
         state.currentHoveredEdges = []
+    }
+
+    func completeActiveMove(at location: CGPoint) {
+        if state.moveLayout == .dwindle {
+            finishDwindleMove()
+        } else {
+            finishNiriMove(at: location)
+        }
+        clearMoveInteractionState()
+        NSCursor.arrow.set()
+    }
+
+    func completeActiveResize() {
+        finishActiveResize()
+        clearResizeInteractionState()
+        NSCursor.arrow.set()
     }
 }

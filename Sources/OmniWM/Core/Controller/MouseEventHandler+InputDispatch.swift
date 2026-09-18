@@ -11,16 +11,27 @@ extension MouseEventHandler {
     }
 
     var trackpadGestureConfig: TrackpadGestureIntent.Config? {
-        guard let settings = controller?.settings else { return nil }
+        guard let controller else { return nil }
+        let settings = controller.settings
+        let overviewState = controller.windowActionHandler.overviewState
+        let isOverviewOpen = overviewState.isOpen
         return TrackpadGestureIntent.Config(
-            columnScrollEnabled: settings.gestures.scrollEnabled && controller?.isOverviewOpen() != true,
+            columnScrollEnabled: settings.gestures.scrollEnabled && !isOverviewOpen,
             columnScrollFingerCount: settings.gestures.fingerCount.rawValue,
-            workspaceSwipeEnabled: settings.gestures.workspaceSwipeEnabled && controller?.isOverviewOpen() != true,
+            workspaceSwipeEnabled: settings.gestures.workspaceSwipeEnabled && !isOverviewOpen,
             workspaceSwipeFingerCount: settings.gestures.workspaceSwipeFingerCount.rawValue,
             workspaceSwipeAxis: settings.gestures.workspaceSwipeAxis,
-            overviewEnabled: settings.gestures.overviewGestureEnabled && controller?.isOverviewOpen() != true,
-            overviewFingerCount: settings.gestures.overviewGestureFingerCount.rawValue
+            overviewAction: settings.gestures.overviewGestureEnabled ? overviewState.gestureAction : nil,
+            overviewFingerCount: settings.gestures.overviewGestureFingerCount.rawValue,
+            windowMoveEnabled: settings.gestures.windowMoveEnabled && !isOverviewOpen,
+            windowMoveFingerCount: settings.gestures.windowMoveFingerCount.rawValue,
+            windowResizeEnabled: settings.gestures.windowResizeEnabled && !isOverviewOpen,
+            windowResizeFingerCount: settings.gestures.windowResizeFingerCount.rawValue
         )
+    }
+
+    var overviewGestureInteractive: Bool {
+        controller?.motionPolicy.animationsEnabled == true
     }
 
     func dispatchMouseMoved(
@@ -201,6 +212,15 @@ extension MouseEventHandler {
         guard !isInputSuppressed else {
             handleInputSuppressionBegan()
             return false
+        }
+        if payload.phase == 0, payload.momentumPhase == 0, payload.isContinuous,
+           let senderId = payload.senderId, senderId != 0
+        {
+            drainTrackpadFrames(for: senderId, at: payload.location)
+            if consumesTrackpadSession(senderId: senderId) {
+                recordDroppedTrackpadScroll()
+                return true
+            }
         }
         let suppress = shouldSuppressScroll(
             at: payload.location,

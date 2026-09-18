@@ -24,6 +24,9 @@ final class WindowActionHandler {
         }
         guard let controller else { fatal("WindowActionHandler requires controller") }
         let oc = OverviewController(wmController: controller, motionPolicy: controller.motionPolicy)
+        oc.onPrepareActivation = { [weak self] handle, workspaceId in
+            self?.prepareOverviewSelection(handle: handle, workspaceId: workspaceId)
+        }
         oc.onActivateWindow = { [weak self] handle, workspaceId in
             self?.activateWindowFromOverview(handle: handle, workspaceId: workspaceId)
         }
@@ -83,6 +86,38 @@ final class WindowActionHandler {
         overviewController.toggle()
     }
 
+    func openOverview() {
+        overviewController.open()
+    }
+
+    func dismissOverview() {
+        overviewControllerStorage?.input.dismissToSelection(animated: true)
+    }
+
+    var overviewState: OverviewState {
+        overviewControllerStorage?.state ?? .closed
+    }
+
+    var isOverviewGestureActive: Bool {
+        overviewControllerStorage?.isInteractiveTransitionActive == true
+    }
+
+    var overviewTransitionProgress: Double {
+        overviewControllerStorage?.transitionProgress ?? 0
+    }
+
+    func beginOverviewGesture() -> Bool {
+        overviewController.beginInteractiveTransition()
+    }
+
+    func updateOverviewGesture(cumulativeUnits: Double, timestamp: TimeInterval) {
+        overviewControllerStorage?.updateInteractiveTransition(cumulativeUnits: cumulativeUnits, timestamp: timestamp)
+    }
+
+    func endOverviewGesture(timestamp: TimeInterval?) {
+        overviewControllerStorage?.endInteractiveTransition(timestamp: timestamp)
+    }
+
     func handleOverviewHotkey(_ invocation: HotkeyInvocation) -> OverviewHotkeyDisposition {
         overviewControllerStorage?.input.handleHotkeyInvocation(invocation) ?? .inactive
     }
@@ -111,35 +146,13 @@ final class WindowActionHandler {
     }
 
     func isOverviewOpen() -> Bool {
-        overviewControllerStorage?.isOpen == true
+        overviewState.isOpen
     }
 
-    func prepareWindowFromOverview(_ handle: WindowHandle, animated: Bool) {
-        guard let controller,
-              let entry = controller.workspaceManager.entry(for: handle),
-              controller.activeWorkspace()?.id == entry.workspaceId,
-              controller.workspaceManager.activeLayoutKind(for: entry.workspaceId) == .niri
-        else { return }
-        navigateToWindowInternal(
-            token: handle.id,
-            workspaceId: entry.workspaceId,
-            motion: animated ? controller.motionPolicy.snapshot() : .disabled,
-            focusAfterLayout: false
-        )
-    }
-
-    func activateWindowFromOverview(handle: WindowHandle, workspaceId: WorkspaceDescriptor.ID) {
+    private func activateWindowFromOverview(handle: WindowHandle, workspaceId: WorkspaceDescriptor.ID) {
         guard let controller else { return }
         guard controller.workspaceManager.entry(for: handle) != nil else { return }
-        if controller.activeWorkspace()?.id == workspaceId,
-           controller.workspaceManager.activeLayoutKind(for: workspaceId) == .niri,
-           let node = controller.niriEngine?.findNode(for: handle.id, in: workspaceId),
-           controller.workspaceManager.niriViewportState(for: workspaceId).selectedNodeId == node.id
-        {
-            controller.focusWindow(handle.id)
-        } else {
-            navigateToWindowInternal(token: handle.id, workspaceId: workspaceId)
-        }
+        navigateToWindowInternal(token: handle.id, workspaceId: workspaceId)
     }
 
     func closeWindow(handle: WindowHandle) -> Bool {

@@ -16,18 +16,32 @@ extension MouseEventHandler {
         if let axis = lockedContext.workspaceAxis {
             config.workspaceSwipeAxis = axis
         }
-        config.overviewEnabled = config.overviewEnabled && lockedContext.overviewCandidate
+        config.overviewAction = lockedContext.overviewAction
         guard let mode = TrackpadGestureIntent.resolveMode(
             config,
             fingerCount: lockedContext.fingerCount,
             cumulativeTranslation: CGVector(dx: metrics.cumulativeX, dy: metrics.cumulativeY),
             columnScrollAxis: lockedContext.columnScrollAxis,
-            columnContextAvailable: lockedContext.columnScrollCandidate && controller.niriEngine != nil
+            columnContextAvailable: lockedContext.columnScrollCandidate && controller.niriEngine != nil,
+            windowContextAvailable: lockedContext.windowGestureTarget != nil
         ) else {
             state.suppressGestureStartUntilAllTouchesLift = true
             resetGestureState()
             return false
         }
+        if case .overview = mode, overviewGestureInteractive,
+           !controller.windowActionHandler.beginOverviewGesture()
+        {
+            state.suppressGestureStartUntilAllTouchesLift = true
+            resetGestureState()
+            return false
+        }
+        if mode.isWindowInteraction, !beginGestureWindowInteraction(mode, lockedContext: lockedContext) {
+            state.suppressGestureStartUntilAllTouchesLift = true
+            resetGestureState()
+            return false
+        }
+        MouseTrace.record("gesture: committed \(mode) with \(lockedContext.fingerCount) fingers")
         state.activeGestureMode = mode
         state.gesturePhase = .committed
         return true
@@ -41,20 +55,8 @@ extension MouseEventHandler {
     ) {
         guard let controller else { return }
         switch state.activeGestureMode {
-        case .overview:
-            guard controller.settings.gestures.overviewGestureEnabled else {
-                abortActiveGestureIfNeeded()
-                return
-            }
-            guard TrackpadGestureIntent.overviewTriggered(
-                translation: CGPoint(x: metrics.cumulativeX, y: metrics.cumulativeY)
-            )
-            else { return }
-            state.suppressGestureStartUntilAllTouchesLift = true
-            state.consumeTrackpadScrollUntilAllTouchesLift = true
-            state.suppressTrackpadMomentumScroll = true
-            resetGestureState(settleViewportGesture: false)
-            controller.windowActionHandler.toggleOverview()
+        case let .overview(action):
+            handleOverviewSwipe(action, metrics: metrics, timestamp: timestamp)
         case .columnScroll:
             guard let engine = controller.niriEngine else {
                 abortActiveGestureIfNeeded()
@@ -84,8 +86,53 @@ extension MouseEventHandler {
                 cumulative: axis == .horizontal ? metrics.cumulativeX : metrics.cumulativeY,
                 monitorId: lockedContext.monitorId
             )
+        case .windowMove:
+            guard state.gestureOwnsWindowInteraction, state.isMoving else {
+                abortActiveGestureIfNeeded()
+                return
+            }
+            updateActiveMove(at: gestureWindowLocation(for: lockedContext))
+        case .windowResize:
+            guard state.gestureOwnsWindowInteraction, state.isResizing else {
+                abortActiveGestureIfNeeded()
+                return
+            }
+            updateManagedResize(at: gestureWindowLocation(for: lockedContext))
         case nil:
             abortActiveGestureIfNeeded()
+        }
+    }
+
+    private func handleOverviewSwipe(
+        _ action: OverviewGestureAction,
+        metrics: GestureFrameMetrics,
+        timestamp: TimeInterval
+    ) {
+        guard let controller, controller.settings.gestures.overviewGestureEnabled else {
+            abortActiveGestureIfNeeded()
+            return
+        }
+        if overviewGestureInteractive {
+            controller.windowActionHandler.updateOverviewGesture(
+                cumulativeUnits: Double(metrics.cumulativeY),
+                timestamp: timestamp
+            )
+            return
+        }
+        let translation = CGPoint(x: metrics.cumulativeX, y: metrics.cumulativeY)
+        guard TrackpadGestureIntent.overviewTriggered(action: action, translation: translation) else { return }
+        retainConsumedTrackpadSession()
+        state.suppressGestureStartUntilAllTouchesLift = true
+        state.consumeTrackpadScrollUntilAllTouchesLift = true
+        state.suppressTrackpadMomentumScroll = true
+        resetGestureState(settleViewportGesture: false)
+        switch action {
+        case .open:
+            controller.windowActionHandler.openOverview()
+        case .close:
+            controller.windowActionHandler.dismissOverview()
+        case .resume:
+            break
         }
     }
 
@@ -113,6 +160,7 @@ extension MouseEventHandler {
         }
         switch state.activeGestureMode {
         case .overview:
+            controller?.windowActionHandler.endOverviewGesture(timestamp: allowFlick ? timestamp : nil)
             state.suppressTrackpadMomentumScroll = true
         case let .workspaceSwitch(axis):
             finalizeWorkspaceSwipe(
@@ -121,6 +169,13 @@ extension MouseEventHandler {
                 allowFlick: allowFlick,
                 timestamp: timestamp
             )
+        case .windowMove,
+             .windowResize:
+            if allowFlick {
+                commitGestureWindowInteraction(lockedContext: lockedContext)
+            } else {
+                cancelGestureWindowInteraction()
+            }
         default:
             if let engine = controller?.niriEngine {
                 finalizeOrCancelCommittedGesture(
@@ -234,6 +289,7 @@ extension MouseEventHandler {
     }
 
     func finalizeCommittedGestureAfterTouchRelease(timestamp: TimeInterval) {
+        retainConsumedTrackpadSession()
         finishCommittedGestureOnRelease(timestamp: timestamp, allowFlick: true)
         state.suppressGestureStartUntilAllTouchesLift = true
         state.consumeTrackpadScrollUntilAllTouchesLift = true
@@ -261,10 +317,13 @@ extension MouseEventHandler {
 
     func abortActiveGestureIfNeeded() {
         if state.gesturePhase == .committed {
-            if state.activeGestureMode == .overview {
+            retainConsumedTrackpadSession()
+            if case .overview = state.activeGestureMode {
                 state.suppressTrackpadMomentumScroll = true
             } else if case .workspaceSwitch = state.activeGestureMode {
                 state.suppressTrackpadMomentumScroll = true
+            } else if state.activeGestureMode?.isWindowInteraction == true {
+                cancelGestureWindowInteraction()
             } else if let lockedContext = state.lockedGestureContext {
                 if let engine = controller?.niriEngine {
                     finalizeOrCancelCommittedGesture(
@@ -285,6 +344,10 @@ extension MouseEventHandler {
     }
 
     func resetGestureState(settleViewportGesture: Bool = true) {
+        cancelGestureWindowInteraction()
+        if state.lockedGestureContext?.overviewAction != nil {
+            controller?.windowActionHandler.endOverviewGesture(timestamp: nil)
+        }
         if settleViewportGesture,
            let lockedContext = state.lockedGestureContext,
            controller?.workspaceManager.animationDriver.hasGesture(in: lockedContext.workspaceId) == true
@@ -298,6 +361,7 @@ extension MouseEventHandler {
         state.gestureLastAverageY = 0.0
         state.lockedGestureContext = nil
         state.activeGestureMode = nil
+        state.gestureFingerCountMismatchSince = nil
         state.viewportGestureSessionID = nil
         state.workspaceSwipeFired = false
     }

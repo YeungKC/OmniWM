@@ -178,6 +178,13 @@ struct MonitorSettingsTab: View {
                 }
             }
 
+            MonitorRolesSection(
+                settings: settings.monitors,
+                connectedMonitors: connectedMonitors,
+                displayLabels: displayLabels,
+                onRankingChanged: controller.updateWorkspaceConfig
+            )
+
             Section("Cross-Monitor Behavior") {
                 Toggle("Focus Across Monitor at Edge", isOn: Bindable(settings.focus).crossesMonitorAtEdge)
                 Toggle("Move Window Across Monitor at Edge", isOn: Bindable(settings.focus).moveCrossesMonitorAtEdge)

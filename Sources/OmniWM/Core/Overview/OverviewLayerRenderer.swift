@@ -21,6 +21,7 @@ final class OverviewLayerRenderer {
     private let searchText = OverviewRenderer.textLayer(size: 16, color: Colors.textDimmed, alignment: .center)
     let caret = CALayer()
     private(set) var windowLayers: [WindowHandle: OverviewWindowLayer] = [:]
+    var previewForHandle: ((WindowHandle) -> OverviewPreviewFrame?)?
     private var chromeLayout: OverviewLayout?
     private var chromeSections: [WorkspaceDescriptor.ID: CALayer] = [:]
     private var contentsScale: CGFloat = 1
@@ -74,7 +75,9 @@ final class OverviewLayerRenderer {
     func cancelAnimation() {
         activeTransition = nil
         completionLayer.removeAnimation(forKey: "overview.completion")
-        for layer in [backdrop, workspaceChrome, dropTarget, search] { OverviewLayerMotion.remove(from: layer) }
+        for layer in [backdrop, content, workspaceChrome, dropTarget, search] {
+            OverviewLayerMotion.remove(from: layer)
+        }
         for layers in windowLayers.values { layers.cancelAnimation() }
     }
 
@@ -93,21 +96,22 @@ final class OverviewLayerRenderer {
 
     func updatePresentation(_ layout: OverviewLayout, state: OverviewRenderState, replacing: Bool = false) {
         let time = CACurrentMediaTime()
-        let motion = activeTransition
-            .map { _ in [backdrop, workspaceChrome, dropTarget, search].map(OverviewLayerMotion.init) } ?? []
+        let motion = activeTransition.map(captureMotion) ?? []
         OverviewRenderer.withoutAnimation {
             root.frame = state.bounds
             backdrop.frame = root.bounds
             backdrop.backgroundColor = state.palette.backdrop
             backdrop.opacity = Float(state.progress)
-            content.frame = root.bounds.offsetBy(dx: 0, dy: -layout.scrollOffset)
+            content.frame = root.bounds.offsetBy(dx: 0, dy: -layout.scrollOffset * CGFloat(state.progress))
             workspaceChrome.opacity = Float(state.progress)
             dropTarget.opacity = Float(state.progress)
             search.opacity = Float(state.progress)
             if state.progress < 1 { caret.removeAnimation(forKey: "blink") }
             let visible = OverviewRenderGeometry.visibleContentRect(
                 bounds: state.bounds,
-                scrollOffset: layout.scrollOffset
+                scrollOffset: layout.scrollOffset,
+                progress: state.progress,
+                transitioning: activeTransition != nil
             )
             for section in layout.workspaceSections {
                 chromeSections[section.workspaceId]?.isHidden = activeTransition == nil && !OverviewRenderGeometry
@@ -115,11 +119,14 @@ final class OverviewLayerRenderer {
                         frame: OverviewRenderGeometry.sectionCullingFrame(section, progress: state.progress),
                         visibleContentRect: visible
                     )
+                let anchored = section.workspaceId == layout.anchorWorkspaceId
                 for window in section.windows {
                     let frame = window.interpolatedFrame(progress: state.progress)
                     guard let layers = windowLayers[window.handle] else { continue }
                     layers.root.isHidden = !OverviewRenderGeometry.shouldRender(
-                        frame: activeTransition == nil ? frame : window.originalFrame.union(window.overviewFrame),
+                        frame: activeTransition == nil
+                            ? frame
+                            : (window.restFrame ?? window.originalFrame).union(window.overviewFrame),
                         visibleContentRect: visible
                     )
                     layers.updateGeometry(
@@ -128,7 +135,8 @@ final class OverviewLayerRenderer {
                         state: state,
                         transition: activeTransition,
                         replacing: replacing,
-                        time: time
+                        time: time,
+                        anchored: anchored
                     )
                 }
             }
@@ -140,13 +148,16 @@ final class OverviewLayerRenderer {
 
     func updateHover(from previous: WindowHandle?, layout: OverviewLayout, state: OverviewRenderState) {
         OverviewRenderer.withoutAnimation {
-            if let previous, previous != state.hoveredWindowHandle, let window = layout.window(for: previous) {
-                windowLayers[previous]?.updateEmphasis(window, state: state)
-            }
-            if let handle = state.hoveredWindowHandle, let window = layout.window(for: handle) {
+            for handle in [previous, state.hoveredWindowHandle].compactMap({ $0 }) {
+                guard let window = layout.window(for: handle) else { continue }
                 windowLayers[handle]?.updateEmphasis(window, state: state)
             }
         }
+    }
+
+    private func captureMotion(for transition: OverviewNativeTransition) -> [OverviewLayerMotion] {
+        [OverviewLayerMotion(backdrop), OverviewLayerMotion(content)] + [workspaceChrome, dropTarget, search]
+            .map { OverviewLayerMotion($0, response: transition.chromeExitResponse) }
     }
 
     func updatePreview(_ frame: OverviewPreviewFrame?, for handle: WindowHandle) {
@@ -161,9 +172,7 @@ final class OverviewLayerRenderer {
     func updateContentsScale(_ scale: CGFloat) {
         guard scale != contentsScale else { return }
         contentsScale = scale
-        OverviewRenderer.withoutAnimation {
-            updateScale(in: root)
-        }
+        OverviewRenderer.withoutAnimation { updateScale(in: root) }
     }
 
     private func updateScale(in layer: CALayer) {
@@ -190,18 +199,17 @@ final class OverviewLayerRenderer {
                     layers = OverviewWindowLayer()
                     windowLayers[window.handle] = layers
                     cards.addSublayer(layers.root)
+                    layers.updatePreview(previewForHandle?(window.handle))
                 }
                 layers.updateContent(window, contentsScale: contentsScale)
                 order.append(layers.root)
             }
         }
-        if cards.sublayers?.count != order.count
-            || zip(cards.sublayers ?? [], order).contains(where: { $0 !== $1 })
-        {
-            cards.sublayers = order
-        }
+        if cards.sublayers?.elementsEqual(order, by: ===) != true { cards.sublayers = order }
     }
+}
 
+extension OverviewLayerRenderer {
     private func rebuildWorkspaceChrome(_ layout: OverviewLayout) {
         guard workspaceChromeNeedsUpdate(layout) else { return }
         chromeLayout = layout

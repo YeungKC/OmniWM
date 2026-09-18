@@ -167,6 +167,10 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
+    var tabRailAppIcons = SettingsStore.defaultExport.tabRailAppIcons {
+        didSet { scheduleSave() }
+    }
+
     func loadPersistedWindowRestoreCatalog() -> PersistedWindowRestoreCatalog {
         runtimeState.windowRestoreCatalog ?? .empty
     }
@@ -317,6 +321,7 @@ extension SettingsStore {
             focus: focus.export(),
             mouseWarp: pointer.export(),
             routing: monitors.export(),
+            monitorRanking: monitors.ranking,
             gaps: gaps.export(),
             niri: niri.export(),
             workspaceConfigurations: workspaces.configurations,
@@ -344,7 +349,8 @@ extension SettingsStore {
             animationsEnabled: animationsEnabled,
             clipboard: clipboard.export(),
             quakeTerminal: quakeTerminal.export(),
-            appearanceMode: appearanceMode
+            appearanceMode: appearanceMode,
+            tabRailAppIcons: tabRailAppIcons
         )
     }
 
@@ -367,6 +373,7 @@ extension SettingsStore {
         pointer.constrainToArrangement = export.mouseWarp.constrainToArrangement
         monitors.routingMode = export.routing.mode
         monitors.arrangements = export.routing.arrangements
+        monitors.ranking = MonitorRanking.normalized(export.monitorRanking)
         gaps.apply(export.gaps)
 
         niri.apply(export.niri, baseline: baseline.niri)
@@ -407,6 +414,7 @@ extension SettingsStore {
         quakeTerminal.apply(export.quakeTerminal, baseline: baseline.quakeTerminal)
 
         appearanceMode = export.appearanceMode
+        tabRailAppIcons = export.tabRailAppIcons
     }
 }
 

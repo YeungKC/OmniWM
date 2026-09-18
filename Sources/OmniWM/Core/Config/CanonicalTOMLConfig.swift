@@ -9,6 +9,7 @@ struct CanonicalTOMLConfig: Codable, Equatable {
     var focus: SettingsExport.Focus
     var mouseWarp: SettingsExport.MouseWarp
     var routing: SettingsExport.Routing
+    var monitors: Monitors?
     var gaps: SettingsExport.Gaps
     var niri: SettingsExport.Niri
     var dwindle: SettingsExport.Dwindle
@@ -42,8 +43,21 @@ struct CanonicalTOMLConfig: Codable, Equatable {
         var animationsEnabled: Bool
     }
 
+    struct Monitors: Codable, Equatable {
+        var ranking: [OutputId]
+    }
+
     struct Appearance: Codable, Equatable {
         var mode: AppearanceMode
+        var tabRailAppIcons: Bool
+    }
+}
+
+extension CanonicalTOMLConfig.Appearance {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try container.decode(AppearanceMode.self, forKey: .mode)
+        tabRailAppIcons = try container.decodeIfPresent(Bool.self, forKey: .tabRailAppIcons) ?? false
     }
 }
 
@@ -57,6 +71,7 @@ extension CanonicalTOMLConfig {
         focus = try container.decode(SettingsExport.Focus.self, forKey: .focus)
         mouseWarp = try container.decode(SettingsExport.MouseWarp.self, forKey: .mouseWarp)
         routing = try container.decode(SettingsExport.Routing.self, forKey: .routing)
+        monitors = try container.decodeIfPresent(Monitors.self, forKey: .monitors)
         gaps = try container.decode(SettingsExport.Gaps.self, forKey: .gaps)
         niri = try container.decode(SettingsExport.Niri.self, forKey: .niri)
         dwindle = try container.decode(SettingsExport.Dwindle.self, forKey: .dwindle)
@@ -101,6 +116,7 @@ extension CanonicalTOMLConfig {
         focus = export.focus
         mouseWarp = export.mouseWarp
         routing = export.routing
+        monitors = export.monitorRanking.isEmpty ? nil : Monitors(ranking: export.monitorRanking)
         gaps = export.gaps
         niri = export.niri
         dwindle = export.dwindle
@@ -113,7 +129,7 @@ extension CanonicalTOMLConfig {
         clipboard = export.clipboard
         quakeTerminal = export.quakeTerminal
         scratchpads = export.scratchpads
-        appearance = Appearance(mode: export.appearanceMode)
+        appearance = Appearance(mode: export.appearanceMode, tabRailAppIcons: export.tabRailAppIcons)
         hotkeys = export.hotkeyBindings
         workspaces = export.workspaceConfigurations
         appRules = export.appRules
@@ -128,11 +144,17 @@ extension CanonicalTOMLConfig {
         var gestures = gestures
         gestures.overviewGestureEnabled = gestures.overviewGestureEnabled ?? false
         gestures.overviewGestureFingerCount = gestures.overviewGestureFingerCount ?? .four
+        gestures.windowMoveEnabled = gestures.windowMoveEnabled ?? false
+        gestures.windowMoveFingerCount = gestures.windowMoveFingerCount ?? .four
+        gestures.windowResizeEnabled = gestures.windowResizeEnabled ?? false
+        gestures.windowResizeFingerCount = gestures.windowResizeFingerCount ?? .three
+        gestures.windowGestureSensitivity = gestures.windowGestureSensitivity ?? 1.0
         return SettingsExport(
             hotkeysEnabled: general.hotkeysEnabled,
             focus: focus,
             mouseWarp: mouseWarp,
             routing: routing,
+            monitorRanking: monitors?.ranking ?? [],
             gaps: gaps,
             niri: niri,
             workspaceConfigurations: workspaces,
@@ -160,7 +182,8 @@ extension CanonicalTOMLConfig {
             animationsEnabled: general.animationsEnabled,
             clipboard: clipboard,
             quakeTerminal: quakeTerminal,
-            appearanceMode: appearance.mode
+            appearanceMode: appearance.mode,
+            tabRailAppIcons: appearance.tabRailAppIcons
         )
     }
 }

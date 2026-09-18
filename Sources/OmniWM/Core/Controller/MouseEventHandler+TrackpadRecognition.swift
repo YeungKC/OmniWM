@@ -20,6 +20,7 @@ extension MouseEventHandler {
         let activeTouchCount = Self.activeTouchCount(in: snapshot.touches)
 
         if phase == .ended || phase == .cancelled {
+            retainConsumedTrackpadSession()
             defer {
                 clearGestureLatches()
                 resetGestureState()
@@ -47,17 +48,14 @@ extension MouseEventHandler {
             requiredFingers: requiredFingers,
             touches: snapshot.touches
         ) else {
-            if state.gesturePhase == .committed, activeTouchCount < requiredFingers {
-                finalizeCommittedGestureAfterTouchRelease(timestamp: snapshot.timestamp)
-                return
-            }
-            let wasOverviewCandidate = state.lockedGestureContext?.overviewCandidate == true
-            abortActiveGestureIfNeeded()
-            if wasOverviewCandidate {
-                state.suppressGestureStartUntilAllTouchesLift = true
-            }
+            handleGestureFingerCountMismatch(
+                activeTouchCount: activeTouchCount,
+                requiredFingers: requiredFingers,
+                snapshot: snapshot
+            )
             return
         }
+        state.gestureFingerCountMismatchSince = nil
 
         if state.gesturePhase == .idle {
             armGestureIfPossible(
@@ -66,9 +64,54 @@ extension MouseEventHandler {
                 average: averageTouchPosition,
                 timestamp: snapshot.timestamp
             )
+            state.lockedGestureContext?.contactSession = snapshot.contactSession
             return
         }
         processActiveGestureFrame(average: averageTouchPosition, timestamp: snapshot.timestamp)
+    }
+
+    private func handleGestureFingerCountMismatch(
+        activeTouchCount: Int,
+        requiredFingers: Int,
+        snapshot: GestureEventSnapshot
+    ) {
+        if state.gesturePhase == .committed {
+            let since = state.gestureFingerCountMismatchSince ?? snapshot.timestamp
+            state.gestureFingerCountMismatchSince = since
+            let held = snapshot.timestamp - since
+            if activeTouchCount > 0, held < (state.activeGestureMode?.fingerCountGrace ?? 0) {
+                return
+            }
+            MouseTrace.record("gesture: \(requiredFingers) -> \(activeTouchCount) fingers, ending")
+            if activeTouchCount < requiredFingers {
+                finalizeCommittedGestureAfterTouchRelease(timestamp: snapshot.timestamp)
+                return
+            }
+        } else if state.gesturePhase == .armed, activeTouchCount > requiredFingers,
+                  state.lockedGestureContext?.overviewAction == nil,
+                  let config = trackpadGestureConfig,
+                  TrackpadGestureIntent.windowGestureMode(config, fingerCount: activeTouchCount) != nil,
+                  let average = Self.averageGestureTouchPosition(
+                      requiredFingers: activeTouchCount,
+                      touches: snapshot.touches
+                  )
+        {
+            MouseTrace.record("gesture: re-arm \(requiredFingers) -> \(activeTouchCount) fingers")
+            resetGestureState()
+            armGestureIfPossible(
+                at: snapshot.location,
+                activeTouchCount: activeTouchCount,
+                average: average,
+                timestamp: snapshot.timestamp
+            )
+            state.lockedGestureContext?.contactSession = snapshot.contactSession
+            return
+        }
+        let wasOverviewCandidate = state.lockedGestureContext?.overviewAction != nil
+        abortActiveGestureIfNeeded()
+        if wasOverviewCandidate {
+            state.suppressGestureStartUntilAllTouchesLift = true
+        }
     }
 
     private func gestureFramePreconditionsSatisfied(at location: CGPoint) -> Bool {
@@ -79,16 +122,29 @@ extension MouseEventHandler {
             abortActiveGestureIfNeeded()
             return false
         }
-        if controller.isOverviewOpen() {
+        let isOverviewOpen = controller.isOverviewOpen()
+        if let context = state.lockedGestureContext {
+            let invalid: Bool
+            if let action = context.overviewAction {
+                let tracking = action == .resume
+                    || (overviewGestureInteractive && state.activeGestureMode == .overview(action))
+                invalid = tracking
+                    ? !controller.windowActionHandler.isOverviewGestureActive
+                    : action != trackpadGestureConfig?.overviewAction
+            } else {
+                invalid = isOverviewOpen
+            }
+            if invalid {
+                abortActiveGestureIfNeeded()
+                state.suppressGestureStartUntilAllTouchesLift = true
+                return false
+            }
+        }
+        if !isOverviewOpen, shouldBlockOwnWindowInput(at: location) {
             abortActiveGestureIfNeeded()
-            state.suppressGestureStartUntilAllTouchesLift = true
             return false
         }
-        if shouldBlockOwnWindowInput(at: location) {
-            abortActiveGestureIfNeeded()
-            return false
-        }
-        guard !state.isResizing, !state.isMoving else {
+        if state.isResizing || state.isMoving, !state.gestureOwnsWindowInteraction {
             abortActiveGestureIfNeeded()
             return false
         }
@@ -101,7 +157,15 @@ extension MouseEventHandler {
         average: CGPoint,
         timestamp: TimeInterval
     ) {
-        guard let context = resolveGestureArmContext(at: location, fingerCount: activeTouchCount) else { return }
+        guard let context = resolveGestureArmContext(at: location, fingerCount: activeTouchCount) else {
+            if let config = trackpadGestureConfig,
+               TrackpadGestureIntent.windowGestureMode(config, fingerCount: activeTouchCount) != nil
+            {
+                state.suppressGestureStartUntilAllTouchesLift = true
+            }
+            return
+        }
+        MouseTrace.record("gesture: armed \(activeTouchCount) fingers at \(TraceFormat.point(location))")
         state.lockedGestureContext = context
         if context.workspaceAxis != nil {
             state.workspaceSwipeTracker.reset()
@@ -112,6 +176,9 @@ extension MouseEventHandler {
         state.gestureLastAverageX = average.x
         state.gestureLastAverageY = average.y
         state.gesturePhase = .armed
+        if context.overviewAction == .resume {
+            _ = controller?.windowActionHandler.beginOverviewGesture()
+        }
     }
 
     private func resolveGestureArmContext(
@@ -122,32 +189,31 @@ extension MouseEventHandler {
         guard let monitor = location.monitorApproximation(in: controller.workspaceManager.monitors),
               let workspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)
         else { return nil }
-        let supportsColumnScroll = switch controller.settings.workspaces.layoutType(for: workspace.name) {
+        let layoutType = controller.settings.workspaces.layoutType(for: workspace.name)
+        let supportsColumnScroll = switch layoutType {
         case .niri,
              .defaultLayout:
             controller.niriEngine != nil
         case .dwindle:
             false
         }
+        let target = TrackpadGestureIntent.windowGestureMode(config, fingerCount: fingerCount) != nil
+            ? windowGestureTarget(at: location, wsId: workspace.id, layoutType: layoutType) : nil
         guard TrackpadGestureIntent.hasCandidateMode(
             config,
             fingerCount: fingerCount,
-            columnContextAvailable: supportsColumnScroll
+            columnContextAvailable: supportsColumnScroll,
+            windowContextAvailable: target != nil
         ) else { return nil }
         let columnScrollCandidate = config.columnScrollEnabled
             && fingerCount == config.columnScrollFingerCount
             && supportsColumnScroll
         let isWorkspaceCandidate = config.workspaceSwipeEnabled && fingerCount == config.workspaceSwipeFingerCount
-        let columnScrollAxis: WorkspaceSwipeAxis
-        if let engine = controller.niriEngine, supportsColumnScroll {
-            columnScrollAxis = resolvedNiriOrientation(
-                engine: engine,
-                workspaceId: workspace.id,
-                monitor: monitor
-            ) == .horizontal ? .horizontal : .vertical
-        } else {
-            columnScrollAxis = .horizontal
-        }
+        let columnScrollAxis = gestureColumnScrollAxis(
+            workspaceId: workspace.id,
+            monitor: monitor,
+            supportsColumnScroll: supportsColumnScroll
+        )
         let workspaceAxis: WorkspaceSwipeAxis? = if isWorkspaceCandidate {
             TrackpadGestureIntent.effectiveWorkspaceSwipeAxis(
                 config,
@@ -163,7 +229,9 @@ extension MouseEventHandler {
             columnScrollCandidate: columnScrollCandidate,
             columnScrollAxis: columnScrollAxis,
             workspaceAxis: workspaceAxis,
-            overviewCandidate: config.overviewEnabled && fingerCount == config.overviewFingerCount
+            overviewAction: fingerCount == config.overviewFingerCount ? config.overviewAction : nil,
+            windowGestureTarget: target,
+            startLocation: location
         )
     }
 

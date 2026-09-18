@@ -72,6 +72,7 @@ final class OverviewWindowSession {
 
         for monitor in monitors {
             let window = OverviewWindow(monitor: monitor, palette: palette)
+            window.previewForHandle = previewForHandle
 
             window.onWindowSelected = { [weak controller, weak self] monitorId, handle in
                 self?.projection.activeInteractionMonitorId = monitorId
@@ -104,9 +105,6 @@ final class OverviewWindowSession {
             }
             window.onDragEnd = { [weak controller] monitorId, point in
                 controller?.drag.endDrag(on: monitorId, at: point)
-            }
-            window.onDragCancel = { [weak controller] in
-                controller?.drag.cancelDrag()
             }
 
             windows.append(window)
@@ -200,10 +198,7 @@ final class OverviewWindowSession {
         for window in windows { window.cancelAnimation() }
     }
 
-    func handleModifierFlagsChanged(_ modifierFlags: NSEvent.ModifierFlags) {
-        let optionPressed = modifierFlags.contains(.option)
-        for window in windows {
-            window.cancelPendingDragIfNeeded(optionPressed: optionPressed)
-        }
+    func presentProgress(_ progress: Double) {
+        for window in windows { window.presentProgress(progress) }
     }
 }
